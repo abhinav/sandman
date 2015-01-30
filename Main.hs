@@ -287,9 +287,9 @@ clean = do
     when (null packages) $
         dieHappy "No packages to remove."
 
-    putStrLn $ "Removing " <> tshow (length packages) <> " packages."
     forM_ packages $ \Package{packageInfoPath} ->
         FS.removeFile packageInfoPath
+    putStrLn $ "Removed " <> tshow (length packages) <> " packages."
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]

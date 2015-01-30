@@ -75,7 +75,7 @@ Next, we mix it into an existing project.
 
     $ sandman clean
     Removing all mixed sandboxes.
-    Removing 45 packages.
+    Removed 45 packages.
     Rebuilding package cache.
 
 # Status
