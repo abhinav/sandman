@@ -3,6 +3,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
+-- TODO the classy-prelude dependency should probably be dropped. Most of the
+-- packages it depends on aren't needed for this project. It doesn't make
+-- sense to download and build half of Hackage for a tool with the sole
+-- purpose of reducing the amount of time spent building packages.
 import ClassyPrelude
 import System.Exit   (ExitCode (..), exitFailure, exitSuccess)
 
@@ -308,6 +312,8 @@ clean = do
 ------------------------------------------------------------------------------
 argParser :: O.Parser (IO ())
 argParser = O.subparser $ concat [
+      -- TODO come up with a better name for managed sandboxes than "sandman
+      -- sandboxes"
       command "list" "List sandman sandboxes or the packages in them" $
         maybe list listPackages <$> listNameArgument
     , command "new" "Create a new sandman sandbox" $
