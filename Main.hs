@@ -1,19 +1,26 @@
 {-# LANGUAGE NamedFieldPuns    #-}
-{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 module Main (main) where
 
--- TODO the classy-prelude dependency should probably be dropped. Most of the
--- packages it depends on aren't needed for this project. It doesn't make
--- sense to download and build half of Hackage for a tool with the sole
--- purpose of reducing the amount of time spent building packages.
-import ClassyPrelude
-import System.Exit   (ExitCode (..), exitFailure, exitSuccess)
+import Control.Applicative
+import Control.Monad
+import Data.List                (isSuffixOf, stripPrefix)
+import Data.Maybe               (isJust, listToMaybe)
+import Data.Monoid
+import Data.Set                 (Set)
+import Data.Text                (Text)
+import System.Directory         (copyFile, createDirectoryIfMissing,
+                                 doesDirectoryExist, getDirectoryContents,
+                                 getHomeDirectory, removeDirectory, removeFile)
+import System.Exit              (ExitCode (..), exitFailure, exitSuccess)
+import System.FilePath          (splitDirectories, takeFileName, (</>))
+import System.PosixCompat.Files (getSymbolicLinkStatus, isDirectory)
 
+import qualified Data.Set                          as Set
+import qualified Data.Text                         as T
+import qualified Data.Text.IO                      as TIO
 import qualified Distribution.InstalledPackageInfo as PInfo
 import qualified Distribution.Text                 as Cabal
-import qualified Filesystem                        as FS
-import qualified Filesystem.Path.CurrentOS         as FP
 import qualified Options.Applicative               as O
 import qualified System.Process                    as Proc
 
@@ -22,6 +29,26 @@ import qualified System.Process                    as Proc
 (<&>) = flip (<$>)
 infixl 1 <&>
 
+whenM :: Monad m => m Bool -> m () -> m ()
+whenM p m = p >>= \c -> when c m
+
+tshow :: Show a => a -> Text
+tshow = T.pack . show
+
+listDirectory :: FilePath -> IO [FilePath]
+listDirectory d = getDirectoryContents d
+    <&> filter (`notElem` [".", ".."])
+    <&> map (d </>)
+
+removeTree :: FilePath -> IO ()
+removeTree path = do
+    status <- getSymbolicLinkStatus path
+    if isDirectory status
+      then listDirectory path
+              >>= mapM_ removeTree
+              >>  removeDirectory path
+      else removeFile path
+
 ------------------------------------------------------------------------------
 newtype Sandman = Sandman { sandmanDirectory :: FilePath }
     deriving (Show, Ord, Eq)
@@ -29,7 +56,7 @@ newtype Sandman = Sandman { sandmanDirectory :: FilePath }
 
 defaultSandman :: IO Sandman
 defaultSandman = do
-    home <- FS.getHomeDirectory
+    home <- getHomeDirectory
     return $! Sandman (home </> ".sandman")
 
 
@@ -37,12 +64,11 @@ sandboxesDirectory :: Sandman -> FilePath
 sandboxesDirectory Sandman{sandmanDirectory} =
     sandmanDirectory </> "sandboxes"
 
-
 getSandboxes :: Sandman -> IO [Sandbox]
 getSandboxes sandman = do
-    exists <- FS.isDirectory sandboxesDir
+    exists <- doesDirectoryExist sandboxesDir
     if exists
-      then map Sandbox <$> FS.listDirectory sandboxesDir
+      then map Sandbox <$> listDirectory sandboxesDir
       else return []
   where
     sandboxesDir = sandboxesDirectory sandman
@@ -50,12 +76,12 @@ getSandboxes sandman = do
 
 getSandbox :: Sandman -> Text -> IO (Maybe Sandbox)
 getSandbox sandman name = do
-    exists <- FS.isDirectory sandboxDir
+    exists <- doesDirectoryExist sandboxDir
     if exists
         then return . Just . Sandbox $ sandboxDir
         else return Nothing
   where
-    sandboxDir = sandboxesDirectory sandman </> fpFromText name
+    sandboxDir = sandboxesDirectory sandman </> T.unpack name
 
 
 ------------------------------------------------------------------------------
@@ -64,18 +90,18 @@ newtype Sandbox = Sandbox { sandboxRoot :: FilePath }
 
 
 sandboxName :: Sandbox -> Text
-sandboxName = fpToText . filename . sandboxRoot
+sandboxName = T.pack . takeFileName . sandboxRoot
 
 
 createSandbox :: FilePath -> Text -> IO Sandbox
 createSandbox dir name = do
-    whenM (FS.isDirectory sandboxDir) $
-        error $ "Sandbox " <> unpack name <> " already exists."
+    whenM (doesDirectoryExist sandboxDir) $
+        die $ "Sandbox " <> name <> " already exists."
 
-    FS.createTree sandboxDir
+    createDirectoryIfMissing True sandboxDir
 
     let proc = (Proc.proc "cabal" ["sandbox", "init", "--sandbox=."]) {
-            Proc.cwd = Just (fpToString sandboxDir)
+            Proc.cwd = Just sandboxDir
           }
 
     (_, _, _, procHandle) <- Proc.createProcess proc
@@ -84,7 +110,7 @@ createSandbox dir name = do
         ExitSuccess   -> return $! Sandbox sandboxDir
         ExitFailure _ -> die $ "Failed to create sandbox " <> name
   where
-    sandboxDir = dir </> fpFromText name
+    sandboxDir = dir </> T.unpack name
 
 
 installPackages :: Sandbox -> [Text] -> IO ()
@@ -96,8 +122,8 @@ installPackages sandbox@Sandbox{sandboxRoot} packages = do
         ExitFailure _ -> die $ "Failed to install packages to " <> name
   where
     name = sandboxName sandbox
-    proc = (Proc.proc "cabal" $ ["install"] <> map unpack packages) {
-        Proc.cwd = Just (fpToString sandboxRoot)
+    proc = (Proc.proc "cabal" $ ["install"] <> map T.unpack packages) {
+        Proc.cwd = Just sandboxRoot
       }
 
 ------------------------------------------------------------------------------
@@ -107,23 +133,22 @@ newtype PackageDb = PackageDb { packageDbRoot :: FilePath }
 
 getPackageDb :: FilePath -> IO (Maybe PackageDb)
 getPackageDb packageRoot = do
-    matches <- readFile sandboxConfig
-        <&> filter ("package-db:" `isPrefixOf`) . lines
+    matches <- TIO.readFile sandboxConfig
+        <&> filter ("package-db:" `T.isPrefixOf`) . T.lines
 
     case listToMaybe matches of
         Nothing -> return Nothing
         Just line ->
-            let right = drop 1 $ dropWhile (/= ':') line
-                value = dropWhile (\c -> c == ' ' || c == '\t') right
-            in return . Just . PackageDb $ fpFromText value
+            let right = T.drop 1 $ T.dropWhile (/= ':') line
+                value = T.dropWhile (\c -> c == ' ' || c == '\t') right
+            in return . Just . PackageDb . T.unpack $ value
   where
-    sandboxConfig =
-        packageRoot </> fpFromText "cabal.sandbox.config"
+    sandboxConfig = packageRoot </> "cabal.sandbox.config"
 
 
 getConfFiles :: PackageDb -> IO [FilePath]
 getConfFiles packageDb =
-    FS.listDirectory path <&> filter ((".conf" `isSuffixOf`) . fpToText)
+    listDirectory path <&> filter (".conf" `isSuffixOf`)
   where
     path = packageDbRoot packageDb
 
@@ -153,14 +178,14 @@ data Package = Package {
 
 installedPackageId :: Package -> Text
 installedPackageId Package{packageInfo} =
-    pack $ Cabal.display (PInfo.sourcePackageId packageInfo)
+    T.pack $ Cabal.display (PInfo.sourcePackageId packageInfo)
 
 ------------------------------------------------------------------------------
 die :: Text -> IO a
-die t = putStrLn t >> exitFailure
+die t = TIO.putStrLn t >> exitFailure
 
 dieHappy :: Text -> IO a
-dieHappy t = putStrLn t >> exitSuccess
+dieHappy t = TIO.putStrLn t >> exitSuccess
 
 ------------------------------------------------------------------------------
 list :: IO ()
@@ -173,12 +198,12 @@ list = do
         let name = sandboxName sandbox
         packageDb' <- getPackageDb (sandboxRoot sandbox)
         case packageDb' of
-          Nothing -> putStrLn $ name <> "(ERROR: could not find package DB)"
+          Nothing ->
+              TIO.putStrLn $ name <> "(ERROR: could not find package DB)"
           Just packageDb -> do
               packageCount <- getPackageCount packageDb
-              putStrLn $ unwords [
-                  name, "(" <> tshow packageCount, "packages)"
-                ]
+              TIO.putStrLn $ T.unwords
+                  [name, "(" <> tshow packageCount, "packages)"]
 
 
 ------------------------------------------------------------------------------
@@ -186,7 +211,7 @@ new :: Text -> IO ()
 new name = do
     sandman <- defaultSandman -- FIXME
     _ <- createSandbox (sandboxesDirectory sandman) name
-    putStrLn $ "Created sandbox " <> name <> "."
+    TIO.putStrLn $ "Created sandbox " <> name <> "."
 
 
 ------------------------------------------------------------------------------
@@ -195,8 +220,8 @@ destroy name = do
     sandman <- defaultSandman
     Sandbox{sandboxRoot} <- getSandbox sandman name
         >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
-    FS.removeTree sandboxRoot
-    putStrLn $ "Removed sandbox " <> name <> "."
+    removeTree sandboxRoot
+    TIO.putStrLn $ "Removed sandbox " <> name <> "."
 
 ------------------------------------------------------------------------------
 install :: Text -> [Text] -> IO ()
@@ -223,7 +248,7 @@ listPackages name = do
     when (null packageIds) $
         dieHappy $ name <> " does not contain any packages."
 
-    forM_ packageIds $ putStrLn . pack . Cabal.display
+    forM_ packageIds $ putStrLn . Cabal.display
 
 
 ------------------------------------------------------------------------------
@@ -248,16 +273,16 @@ mix name = do
         dieHappy "No packages to mix in."
 
     putStrLn $ unwords [
-        "Mixing", tshow newPackageCount
+        "Mixing", show newPackageCount
       , "new packages into package DB at"
-      , fpToText (packageDbRoot currentPackageDb)
+      , packageDbRoot currentPackageDb
       ]
 
     let currentPackageDbRoot = packageDbRoot currentPackageDb
     forM_ packagesToInstall $ \Package{packageInfoPath} ->
-        FS.copyFile
+        copyFile
             packageInfoPath
-            (currentPackageDbRoot </> filename packageInfoPath)
+            (currentPackageDbRoot </> takeFileName packageInfoPath)
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
@@ -265,11 +290,11 @@ mix name = do
     filterPackages installed = loop []
       where
         installedIndex :: Set Text
-        installedIndex = setFromList $ map installedPackageId installed
+        installedIndex = Set.fromList $ map installedPackageId installed
 
         loop toInstall [] = toInstall
         loop toInstall (c:candidates)
-            | installedPackageId c `member` installedIndex
+            | installedPackageId c `Set.member` installedIndex
                 = loop toInstall candidates
             | otherwise = loop (c:toInstall) candidates
 
@@ -287,9 +312,8 @@ clean = do
     when (null packages) $
         dieHappy "No packages to remove."
 
-    forM_ packages $ \Package{packageInfoPath} ->
-        FS.removeFile packageInfoPath
-    putStrLn $ "Removed " <> tshow (length packages) <> " packages."
+    forM_ packages $ removeFile . packageInfoPath
+    putStrLn $ "Removed " <> show (length packages) <> " packages."
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
@@ -298,8 +322,8 @@ clean = do
     filterPackages Sandman{sandmanDirectory} = filter isMixedIn
       where
         isSandmanPath p = isJust $
-            stripPrefix (FP.splitDirectories sandmanDirectory)
-                        (FP.splitDirectories $ fpFromString p)
+            stripPrefix (splitDirectories sandmanDirectory)
+                        (splitDirectories p)
 
         isMixedIn Package{packageInfo} = any isSandmanPath $
             concatMap ($ packageInfo) [
@@ -311,7 +335,7 @@ clean = do
 
 ------------------------------------------------------------------------------
 argParser :: O.Parser (IO ())
-argParser = O.subparser $ concat [
+argParser = O.subparser $ mconcat [
       -- TODO come up with a better name for managed sandboxes than "sandman
       -- sandboxes"
       command "list" "List sandman sandboxes or the packages in them" $
@@ -328,16 +352,16 @@ argParser = O.subparser $ concat [
         pure clean
     ]
   where
-    listNameArgument = O.optional . textArgument $ O.metavar "name" ++
+    listNameArgument = O.optional . textArgument $ O.metavar "name" <>
         O.help (unwords [
             "If given, list packages installed in the specified sandbox,"
           , "otherwise list all sandman sandboxes"
           ])
     packagesArgument = O.some . textArgument $
-        O.metavar "PACKAGES" ++ O.help "Packages to install"
+        O.metavar "PACKAGES" <> O.help "Packages to install"
     nameArgument = textArgument $
-        O.metavar "NAME" ++ O.help "Name of the sandman sandbox"
-    textArgument = map pack . O.strArgument
+        O.metavar "NAME" <> O.help "Name of the sandman sandbox"
+    textArgument = fmap T.pack . O.strArgument
     command name desc p =
         O.command name (O.info (O.helper <*> p) (O.progDesc desc))
 
