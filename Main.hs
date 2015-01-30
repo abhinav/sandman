@@ -194,6 +194,25 @@ install name packages = do
         >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
     installPackages sandbox packages
 
+
+------------------------------------------------------------------------------
+listPackages :: Text -> IO ()
+listPackages name = do
+    sandman <- defaultSandman
+    -- TODO get rid of all this duplication
+    sandbox <- getSandbox sandman name
+        >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
+    packageDb <- getPackageDb (sandboxRoot sandbox)
+        >>= maybe (die $ "Could not find package DB for " <> name) return
+    packageIds <- map (PInfo.sourcePackageId . packageInfo)
+        <$> getPackages packageDb
+
+    when (null packageIds) $
+        dieHappy $ name <> " does not contain any packages."
+
+    forM_ packageIds $ putStrLn . pack . Cabal.display
+
+
 ------------------------------------------------------------------------------
 mix :: Text -> IO ()
 mix name = do
@@ -241,6 +260,7 @@ mix name = do
                 = loop toInstall candidates
             | otherwise = loop (c:toInstall) candidates
 
+
 ------------------------------------------------------------------------------
 clean :: IO ()
 clean = do
@@ -275,10 +295,12 @@ clean = do
               , PInfo.haddockInterfaces
               ]
 
+
 ------------------------------------------------------------------------------
 argParser :: O.Parser (IO ())
-argParser = O.subparser $ mconcat [
-      command "list" "List sandman sandboxes" $ pure list
+argParser = O.subparser $ concat [
+      command "list" "List sandman sandboxes or the packages in them" $
+        maybe list listPackages <$> listNameArgument
     , command "new" "Create a new sandman sandbox" $
         new <$> nameArgument
     , command "install" "Install a new package" $
@@ -289,11 +311,16 @@ argParser = O.subparser $ mconcat [
         pure clean
     ]
   where
+    listNameArgument = O.optional . textArgument $ O.metavar "name" ++
+        O.help (unwords [
+            "If given, list packages installed in the specified sandbox,"
+          , "otherwise list all sandman sandboxes"
+          ])
     packagesArgument = O.some . textArgument $
         O.metavar "PACKAGES" ++ O.help "Packages to install"
     nameArgument = textArgument $
         O.metavar "NAME" ++ O.help "Name of the sandman sandbox"
-    textArgument = fmap pack . O.strArgument
+    textArgument = map pack . O.strArgument
     command name desc p =
         O.command name (O.info (O.helper <*> p) (O.progDesc desc))
 
