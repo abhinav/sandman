@@ -186,6 +186,15 @@ new name = do
 
 
 ------------------------------------------------------------------------------
+destroy :: Text -> IO ()
+destroy name = do
+    sandman <- defaultSandman
+    Sandbox{sandboxRoot} <- getSandbox sandman name
+        >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
+    FS.removeTree sandboxRoot
+    putStrLn $ "Removed sandbox " <> name <> "."
+
+------------------------------------------------------------------------------
 install :: Text -> [Text] -> IO ()
 install name packages = do
     -- TODO parse package IDs
@@ -303,6 +312,8 @@ argParser = O.subparser $ concat [
         maybe list listPackages <$> listNameArgument
     , command "new" "Create a new sandman sandbox" $
         new <$> nameArgument
+    , command "destroy" "Delete a sandman sandbox" $
+        destroy <$> nameArgument
     , command "install" "Install a new package" $
         install <$> nameArgument <*> packagesArgument
     , command "mix" "Mix a sandman sandbox into the current project" $
