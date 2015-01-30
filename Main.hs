@@ -10,6 +10,7 @@ import qualified Distribution.InstalledPackageInfo as PInfo
 import qualified Distribution.Text                 as Cabal
 import qualified Filesystem                        as FS
 import qualified Filesystem.Path.CurrentOS         as FP
+import qualified Options.Applicative               as O
 import qualified System.Process                    as Proc
 
 -- | '<$>' with the arguments flipped.
@@ -275,14 +276,29 @@ clean = do
               ]
 
 ------------------------------------------------------------------------------
+argParser :: O.Parser (IO ())
+argParser = O.subparser $ mconcat [
+      command "list" "List sandman sandboxes" $ pure list
+    , command "new" "Create a new sandman sandbox" $
+        new <$> nameArgument
+    , command "install" "Install a new package" $
+        install <$> nameArgument <*> packagesArgument
+    , command "mix" "Mix a sandman sandbox into the current project" $
+        mix <$> nameArgument
+    , command "clean" "Remove all mixed sandboxes from the current project" $
+        pure clean
+    ]
+  where
+    packagesArgument = O.some . textArgument $
+        O.metavar "PACKAGES" ++ O.help "Packages to install"
+    nameArgument = textArgument $
+        O.metavar "NAME" ++ O.help "Name of the sandman sandbox"
+    textArgument = fmap pack . O.strArgument
+    command name desc p =
+        O.command name (O.info (O.helper <*> p) (O.progDesc desc))
+
+
 main :: IO ()
-main = do
-    -- TODO proper argument parsing
-    args <- readArgs
-    case args of
-        ["list"] -> list
-        ["new", name] -> new name
-        "install":"--to":name:packages -> install name packages
-        ["mix", name] -> mix name
-        ["clean"] -> clean
-        _ -> die "USAGE: sandman COMMAND"
+main = join $ O.execParser opts
+  where
+    opts = O.info (O.helper <*> argParser) O.fullDesc

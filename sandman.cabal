@@ -14,11 +14,12 @@ description   : TODO
 
 executable sandman
   main-is          : Main.hs
-  build-depends    : base            >= 4.7  && < 4.8
+  build-depends    : base                 >= 4.7  && < 4.8
 
                    , Cabal
-                   , classy-prelude  >= 0.10
-                   , process         >= 1.2
-                   , system-fileio   >= 0.3
-                   , system-filepath >= 0.4
+                   , classy-prelude       >= 0.10
+                   , optparse-applicative >= 0.11
+                   , process              >= 1.2
+                   , system-fileio        >= 0.3
+                   , system-filepath      >= 0.4
   default-language : Haskell2010
