@@ -4,66 +4,50 @@ module Main (main) where
 
 import Control.Applicative
 import Control.Monad
-import Data.List                (isSuffixOf, stripPrefix)
-import Data.Maybe               (isJust, listToMaybe)
+import Data.List           (stripPrefix)
+import Data.Maybe          (isJust, listToMaybe)
 import Data.Monoid
-import Data.Set                 (Set)
-import Data.Text                (Text)
-import System.Directory         (copyFile, createDirectoryIfMissing,
-                                 doesDirectoryExist, getDirectoryContents,
-                                 getHomeDirectory, removeDirectory, removeFile)
-import System.Exit              (ExitCode (..), exitFailure, exitSuccess)
-import System.FilePath          (splitDirectories, takeFileName, (</>))
-import System.PosixCompat.Files (getSymbolicLinkStatus, isDirectory)
+import Data.Set            (Set)
+import Data.Text           (Text)
+import System.Directory    (copyFile, createDirectoryIfMissing,
+                            doesDirectoryExist, getHomeDirectory, removeFile)
+import System.Exit         (ExitCode (..))
+import System.FilePath     (splitDirectories, takeFileName, (</>))
 
 import qualified Data.Set                          as Set
 import qualified Data.Text                         as T
 import qualified Data.Text.IO                      as TIO
 import qualified Distribution.InstalledPackageInfo as PInfo
-import qualified Distribution.Text                 as Cabal
 import qualified Options.Applicative               as O
 import qualified System.Process                    as Proc
 
--- | '<$>' with the arguments flipped.
-(<&>) :: Functor f => f a -> (a -> b) -> f b
-(<&>) = flip (<$>)
-infixl 1 <&>
-
-whenM :: Monad m => m Bool -> m () -> m ()
-whenM p m = p >>= \c -> when c m
-
-tshow :: Show a => a -> Text
-tshow = T.pack . show
-
-listDirectory :: FilePath -> IO [FilePath]
-listDirectory d = getDirectoryContents d
-    <&> filter (`notElem` [".", ".."])
-    <&> map (d </>)
-
-removeTree :: FilePath -> IO ()
-removeTree path = do
-    status <- getSymbolicLinkStatus path
-    if isDirectory status
-      then listDirectory path
-              >>= mapM_ removeTree
-              >>  removeDirectory path
-      else removeFile path
+import Sandman.InstalledPackage
+import Sandman.PackageDb
+import Sandman.Util
 
 ------------------------------------------------------------------------------
+-- | Main context for the program.
+--
+-- Currently this just consists of the root directory where all sandman files
+-- will be stored.
 newtype Sandman = Sandman { sandmanDirectory :: FilePath }
     deriving (Show, Ord, Eq)
 
 
+-- | Build the context with default settings.
 defaultSandman :: IO Sandman
 defaultSandman = do
     home <- getHomeDirectory
     return $! Sandman (home </> ".sandman")
 
 
+-- | Path to the directory which will hold the sandboxes.
 sandboxesDirectory :: Sandman -> FilePath
 sandboxesDirectory Sandman{sandmanDirectory} =
     sandmanDirectory </> "sandboxes"
 
+
+-- | Get all managed sandboxes.
 getSandboxes :: Sandman -> IO [Sandbox]
 getSandboxes sandman = do
     exists <- doesDirectoryExist sandboxesDir
@@ -74,6 +58,7 @@ getSandboxes sandman = do
     sandboxesDir = sandboxesDirectory sandman
 
 
+-- | Get the sandbox with the given name.
 getSandbox :: Sandman -> Text -> IO (Maybe Sandbox)
 getSandbox sandman name = do
     exists <- doesDirectoryExist sandboxDir
@@ -85,16 +70,24 @@ getSandbox sandman name = do
 
 
 ------------------------------------------------------------------------------
-newtype Sandbox = Sandbox { sandboxRoot :: FilePath }
-    deriving (Show, Ord, Eq)
+-- | Represents a cabal sandbox.
+newtype Sandbox = Sandbox {
+    sandboxRoot :: FilePath
+  -- ^ Path to the sandbox root.
+  --
+  -- Note: This is /not/ the project root. It just happens to be that the
+  -- project root and sandbox root is the same for managed sandboxes.
+  } deriving (Show, Ord, Eq)
 
 
+-- | Name of the sandbox.
 sandboxName :: Sandbox -> Text
 sandboxName = T.pack . takeFileName . sandboxRoot
 
 
-createSandbox :: FilePath -> Text -> IO Sandbox
-createSandbox dir name = do
+-- | Create a new managed sandbox with the given name.
+createSandbox :: Sandman -> Text -> IO Sandbox
+createSandbox sandman name = do
     whenM (doesDirectoryExist sandboxDir) $
         die $ "Sandbox " <> name <> " already exists."
 
@@ -110,9 +103,10 @@ createSandbox dir name = do
         ExitSuccess   -> return $! Sandbox sandboxDir
         ExitFailure _ -> die $ "Failed to create sandbox " <> name
   where
-    sandboxDir = dir </> T.unpack name
+    sandboxDir = sandboxesDirectory sandman </> T.unpack name
 
 
+-- | Install the specified packages into the sandbox.
 installPackages :: Sandbox -> [Text] -> IO ()
 installPackages sandbox@Sandbox{sandboxRoot} packages = do
     (_, _, _, procHandle) <- Proc.createProcess proc
@@ -127,65 +121,30 @@ installPackages sandbox@Sandbox{sandboxRoot} packages = do
       }
 
 ------------------------------------------------------------------------------
-newtype PackageDb = PackageDb { packageDbRoot :: FilePath }
-    deriving (Show, Ord, Eq)
 
-
-getPackageDb :: FilePath -> IO (Maybe PackageDb)
-getPackageDb packageRoot = do
+-- | Get the PackageDb for the given package.
+--
+-- The package root is the directory containing the @cabal.sandbox.config@.
+determinePackageDb :: FilePath -> IO (Either String PackageDb)
+determinePackageDb packageRoot = do
+    -- TODO check if sandboxConfig exists
     matches <- TIO.readFile sandboxConfig
         <&> filter ("package-db:" `T.isPrefixOf`) . T.lines
-
     case listToMaybe matches of
-        Nothing -> return Nothing
+        Nothing -> return . Left $
+            "Could not determine package DB for " ++ packageRoot
         Just line ->
             let right = T.drop 1 $ T.dropWhile (/= ':') line
                 value = T.dropWhile (\c -> c == ' ' || c == '\t') right
-            in return . Just . PackageDb . T.unpack $ value
+                root  = T.unpack value
+            in getPackageDb root
   where
     sandboxConfig = packageRoot </> "cabal.sandbox.config"
 
+-- | Get the number of packages installed in the given package DB.
+installedPackageCount :: PackageDb -> Int
+installedPackageCount = length . packageDbInstalledPackages
 
-getConfFiles :: PackageDb -> IO [FilePath]
-getConfFiles packageDb =
-    listDirectory path <&> filter (".conf" `isSuffixOf`)
-  where
-    path = packageDbRoot packageDb
-
-
-getPackageCount :: PackageDb -> IO Int
-getPackageCount = getConfFiles >=> return . length
-
-
-getPackages :: PackageDb -> IO [Package]
-getPackages db =
-    getConfFiles db >>= mapM parse
-  where
-    parse :: FilePath -> IO Package
-    parse path = do
-        contents <- readFile path
-        case PInfo.parseInstalledPackageInfo contents of
-            PInfo.ParseFailed e -> fail (show e)
-            PInfo.ParseOk _ a -> return $! Package a path
-
-
-------------------------------------------------------------------------------
-data Package = Package {
-    packageInfo     :: PInfo.InstalledPackageInfo
-  , packageInfoPath :: FilePath
-  } deriving (Show)
-
-
-installedPackageId :: Package -> Text
-installedPackageId Package{packageInfo} =
-    T.pack $ Cabal.display (PInfo.sourcePackageId packageInfo)
-
-------------------------------------------------------------------------------
-die :: Text -> IO a
-die t = TIO.putStrLn t >> exitFailure
-
-dieHappy :: Text -> IO a
-dieHappy t = TIO.putStrLn t >> exitSuccess
 
 ------------------------------------------------------------------------------
 list :: IO ()
@@ -196,12 +155,13 @@ list = do
         putStrLn "No sandboxes created."
     forM_ sandboxes $ \sandbox -> do
         let name = sandboxName sandbox
-        packageDb' <- getPackageDb (sandboxRoot sandbox)
+        packageDb' <- determinePackageDb (sandboxRoot sandbox)
         case packageDb' of
-          Nothing ->
-              TIO.putStrLn $ name <> "(ERROR: could not find package DB)"
-          Just packageDb -> do
-              packageCount <- getPackageCount packageDb
+          Left err -> do
+              warn (T.pack err)
+              TIO.putStrLn $ name <> "(ERROR: could not read package DB)"
+          Right packageDb -> do
+              let packageCount = installedPackageCount packageDb
               TIO.putStrLn $ T.unwords
                   [name, "(" <> tshow packageCount, "packages)"]
 
@@ -210,7 +170,7 @@ list = do
 new :: Text -> IO ()
 new name = do
     sandman <- defaultSandman -- FIXME
-    _ <- createSandbox (sandboxesDirectory sandman) name
+    _ <- createSandbox sandman name
     TIO.putStrLn $ "Created sandbox " <> name <> "."
 
 
@@ -222,6 +182,7 @@ destroy name = do
         >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
     removeTree sandboxRoot
     TIO.putStrLn $ "Removed sandbox " <> name <> "."
+
 
 ------------------------------------------------------------------------------
 install :: Text -> [Text] -> IO ()
@@ -240,34 +201,32 @@ listPackages name = do
     -- TODO get rid of all this duplication
     sandbox <- getSandbox sandman name
         >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
-    packageDb <- getPackageDb (sandboxRoot sandbox)
-        >>= maybe (die $ "Could not find package DB for " <> name) return
-    packageIds <- map (PInfo.sourcePackageId . packageInfo)
-        <$> getPackages packageDb
+    packageDb <- determinePackageDb (sandboxRoot sandbox)
+             >>= either fail return
+    let packageIds = packageDbInstalledPackages packageDb
+                 <&> installedPackageId
 
     when (null packageIds) $
         dieHappy $ name <> " does not contain any packages."
 
-    forM_ packageIds $ putStrLn . Cabal.display
+    forM_ packageIds TIO.putStrLn
 
 
 ------------------------------------------------------------------------------
 mix :: Text -> IO ()
 mix name = do
-    currentPackageDb <- getPackageDb "."
-        >>= maybe (die "You're not inside a Cabal sandbox.") return
+    currentPackageDb <- determinePackageDb "." >>= either fail return
 
     sandman <- defaultSandman
     sandbox <- getSandbox sandman name
         >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
-    sandboxPackageDb <- getPackageDb (sandboxRoot sandbox)
-        >>= maybe (die $ "Could not find package DB for " <> name) return
+    sandboxPackageDb <- determinePackageDb (sandboxRoot sandbox)
+                    >>= either fail return
 
-    packagesToInstall <- filterPackages
-        <$> getPackages currentPackageDb
-        <*> getPackages sandboxPackageDb
-
-    let newPackageCount = length packagesToInstall
+    let packagesToInstall = filterPackages
+            (packageDbInstalledPackages currentPackageDb)
+            (packageDbInstalledPackages sandboxPackageDb)
+        newPackageCount = length packagesToInstall
 
     when (newPackageCount == 0) $
         dieHappy "No packages to mix in."
@@ -279,10 +238,10 @@ mix name = do
       ]
 
     let currentPackageDbRoot = packageDbRoot currentPackageDb
-    forM_ packagesToInstall $ \Package{packageInfoPath} ->
-        copyFile
-            packageInfoPath
-            (currentPackageDbRoot </> takeFileName packageInfoPath)
+    forM_ packagesToInstall $ \installedPackage ->
+      let currentPath = installedPackageInfoPath installedPackage
+          newPath = currentPackageDbRoot </> takeFileName currentPath
+      in copyFile currentPath newPath
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
@@ -302,35 +261,40 @@ mix name = do
 ------------------------------------------------------------------------------
 clean :: IO ()
 clean = do
-    currentPackageDb <- getPackageDb "."
-        >>= maybe (die "You're not inside a Cabal sandbox.") return
+    currentPackageDb <- determinePackageDb "." >>= either fail return
     sandman <- defaultSandman
     putStrLn "Removing all mixed sandboxes."
 
-    packages <- filterPackages sandman <$> getPackages currentPackageDb
+    let packages = filterPackages sandman $
+            packageDbInstalledPackages currentPackageDb
 
     when (null packages) $
         dieHappy "No packages to remove."
 
-    forM_ packages $ removeFile . packageInfoPath
+    forM_ packages $ removeFile . installedPackageInfoPath
     putStrLn $ "Removed " <> show (length packages) <> " packages."
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
   where
-    filterPackages :: Sandman -> [Package] -> [Package]
+    -- FIXME this will probably cause all kinds of trouble if one managed
+    -- sandbox is mixed into another. That should be disallowed or this should
+    -- be smarter.
+    filterPackages :: Sandman -> [InstalledPackage] -> [InstalledPackage]
     filterPackages Sandman{sandmanDirectory} = filter isMixedIn
       where
         isSandmanPath p = isJust $
             stripPrefix (splitDirectories sandmanDirectory)
                         (splitDirectories p)
 
-        isMixedIn Package{packageInfo} = any isSandmanPath $
+        isMixedIn installedPackage = any isSandmanPath $
             concatMap ($ packageInfo) [
                 PInfo.importDirs
               , PInfo.libraryDirs
               , PInfo.haddockInterfaces
               ]
+          where
+            packageInfo = installedPackageInfo installedPackage
 
 
 ------------------------------------------------------------------------------
