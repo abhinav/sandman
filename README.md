@@ -26,11 +26,11 @@ development.
     $ sandman list
     lens (25 packages)
 
-    $ sandbox new common
+    $ sandman new common
     [..]
     Created sandbox common.
 
-    $ sandbox install common classy-prelude
+    $ sandman install common classy-prelude
     [..]
     Configuring classy-prelude-0.10.2...
     Building classy-prelude-0.10.2...
