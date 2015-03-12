@@ -9,8 +9,10 @@ import Data.Maybe          (isJust, listToMaybe)
 import Data.Monoid
 import Data.Set            (Set)
 import Data.Text           (Text)
-import System.Directory    (copyFile, createDirectoryIfMissing,
-                            doesDirectoryExist, getHomeDirectory, removeFile)
+import System.Directory    (canonicalizePath, copyFile,
+                            createDirectoryIfMissing, doesDirectoryExist,
+                            doesFileExist, findExecutable, getHomeDirectory,
+                            removeFile)
 import System.Exit         (ExitCode (..))
 import System.FilePath     (splitDirectories, takeFileName, (</>))
 
@@ -105,7 +107,6 @@ createSandbox sandman name = do
   where
     sandboxDir = sandboxesDirectory sandman </> T.unpack name
 
-
 -- | Install the specified packages into the sandbox.
 installPackages :: Sandbox -> [Text] -> IO ()
 installPackages sandbox@Sandbox{sandboxRoot} packages = do
@@ -121,6 +122,42 @@ installPackages sandbox@Sandbox{sandboxRoot} packages = do
       }
 
 ------------------------------------------------------------------------------
+
+-- TODO probably need another data type for Projects.
+
+getPackageGhcPath :: FilePath -> IO (Maybe FilePath)
+getPackageGhcPath packageRoot = do
+    hasConfig <- doesFileExist cabalConfigPath
+    if not hasConfig
+      then return Nothing
+      else TIO.readFile cabalConfigPath
+            <&> map readField . T.lines
+            <&> filter (("with-compiler" ==) . fst)
+            <&> fmap (T.unpack . snd) . listToMaybe
+  where
+    readField line = (T.strip k, T.strip $ T.drop 1 v)
+      where (k, v) = T.breakOn ":" $ T.strip line
+    cabalConfigPath = packageRoot </> "cabal.config"
+
+
+setPackageGhcPath :: FilePath -> FilePath -> IO ()
+setPackageGhcPath packageRoot ghc = do
+    hasConfig <- doesFileExist cabalConfigPath
+    if not hasConfig
+      then TIO.writeFile cabalConfigPath entry
+      else TIO.readFile cabalConfigPath
+            <&> T.unlines . loop [] . T.lines
+            >>= TIO.writeFile cabalConfigPath
+  where
+    entry = "with-compiler: " <> T.pack ghc
+    cabalConfigPath = packageRoot </> "cabal.config"
+    loop outLines [] = reverse outLines
+    loop outLines (x:xs)
+        | "with-compiler" `T.isPrefixOf` T.strip x
+                    = loop (entry:outLines) xs
+        | otherwise = loop     (x:outLines) xs
+
+
 
 -- | Get the PackageDb for the given package.
 --
@@ -167,12 +204,25 @@ list = do
 
 
 ------------------------------------------------------------------------------
-new :: Text -> IO ()
-new name = do
+new :: Maybe FilePath -> Text -> IO ()
+new ghcPath' name = do
+    ghcPath <- maybe (return Nothing)
+                     (fmap Just . resolveExecutable)
+                     ghcPath'
     sandman <- defaultSandman -- FIXME
-    _ <- createSandbox sandman name
+    Sandbox{sandboxRoot} <- createSandbox sandman name
+    maybe (return ())
+          (setPackageGhcPath sandboxRoot)
+          ghcPath
     TIO.putStrLn $ "Created sandbox " <> name <> "."
-
+  where
+    resolveExecutable path = do
+        exists <- doesFileExist path
+        if exists
+            then canonicalizePath path
+            else
+              findExecutable path >>=
+              maybe (die $ "Could not find GHC at " <> T.pack path) return
 
 ------------------------------------------------------------------------------
 destroy :: Text -> IO ()
@@ -243,6 +293,13 @@ mix name = do
           newPath = currentPackageDbRoot </> takeFileName currentPath
       in copyFile currentPath newPath
 
+    ghcPath <- getPackageGhcPath (sandboxRoot sandbox)
+    case ghcPath of
+        Nothing -> return ()
+        Just path -> do
+            putStrLn $ "Setting GHC version for project to " ++ path
+            setPackageGhcPath "." path
+
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
   where
@@ -305,7 +362,8 @@ argParser = O.subparser $ mconcat [
       command "list" "List sandman sandboxes or the packages in them" $
         maybe list listPackages <$> listNameArgument
     , command "new" "Create a new sandman sandbox" $
-        new <$> nameArgument
+        new <$> newOptions
+            <*> nameArgument
     , command "destroy" "Delete a sandman sandbox" $
         destroy <$> nameArgument
     , command "install" "Install a new package" $
@@ -316,6 +374,13 @@ argParser = O.subparser $ mconcat [
         pure clean
     ]
   where
+    newOptions = O.optional . O.strOption $
+        O.long "with-ghc" <> O.metavar "GHC" <>
+        O.help (unwords [
+            "Use a different version of GHC in this sandbox."
+          , "When this sandbox is mixed into package sandboxes, their"
+          , "cabal.config will be updated to use this version of GHC."
+          ])
     listNameArgument = O.optional . textArgument $ O.metavar "name" <>
         O.help (unwords [
             "If given, list packages installed in the specified sandbox,"
