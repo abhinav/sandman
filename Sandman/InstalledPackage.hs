@@ -4,15 +4,19 @@ module Sandman.InstalledPackage (
     , installedPackageInfo
     , installedPackageInfoPath
     , installedPackageId
+    , installedPackageName
+    , installedPackageVersion
 
     , getInstalledPackage
     ) where
 
-import Data.Text        (Text)
-import System.Directory (doesFileExist)
+import Data.Text            (Text)
+import Distribution.Version (Version)
+import System.Directory     (doesFileExist)
 
 import qualified Data.Text                         as Text
 import qualified Distribution.InstalledPackageInfo as Cabal
+import qualified Distribution.Package              as Cabal
 import qualified Distribution.Text                 as Cabal
 
 -- | Represents a Cabal package installed somewhere in the system.
@@ -21,9 +25,22 @@ data InstalledPackage = InstalledPackage {
   -- ^ 'Cabal.InstalledPackageInfo' for the package.
   , installedPackageInfoPath :: FilePath
   -- ^ Path where the 'Cabal.InstalledPackageInfo' file is stored.
-  , installedPackageId       :: Text
-  -- ^ Package ID
+  , cabalPackageId           :: Cabal.PackageId
+  -- ^ Cabal package ID
   }
+
+-- | Get the package ID for the given InstalledPackage
+installedPackageId :: InstalledPackage -> Text
+installedPackageId = Text.pack . Cabal.display . cabalPackageId
+
+-- | Get the package name
+installedPackageName :: InstalledPackage -> Text
+installedPackageName =
+    Text.pack . Cabal.display . Cabal.pkgName . cabalPackageId
+
+-- | Get the package version
+installedPackageVersion :: InstalledPackage -> Version
+installedPackageVersion = Cabal.pkgVersion . cabalPackageId
 
 -- | Build a 'InstalledPackage' object from the given path.
 --
@@ -41,13 +58,9 @@ getInstalledPackage_ installedPackageInfoPath =
     case Cabal.parseInstalledPackageInfo contents of
       Cabal.ParseFailed e -> return . Left $
           "Failed to parse " ++ installedPackageInfoPath ++ ": " ++ show e
-      Cabal.ParseOk _ installedPackageInfo ->
-          let installedPackageId = getPackageId installedPackageInfo
-          in return . Right $
-              InstalledPackage{
-                  installedPackageInfo
-                , installedPackageInfoPath
-                , installedPackageId
-                }
-  where
-    getPackageId = Text.pack . Cabal.display . Cabal.sourcePackageId
+      Cabal.ParseOk _ installedPackageInfo -> return . Right $
+          InstalledPackage{
+              installedPackageInfo
+            , installedPackageInfoPath
+            , cabalPackageId = Cabal.sourcePackageId installedPackageInfo
+            }

@@ -5,7 +5,7 @@ module Main (main) where
 import Control.Applicative
 import Control.Monad
 import Data.List           (stripPrefix)
-import Data.Maybe          (isJust, listToMaybe)
+import Data.Maybe          (fromMaybe, isJust, listToMaybe)
 import Data.Monoid
 import Data.Set            (Set)
 import Data.Text           (Text)
@@ -16,10 +16,12 @@ import System.Directory    (canonicalizePath, copyFile,
 import System.Exit         (ExitCode (..))
 import System.FilePath     (splitDirectories, takeFileName, (</>))
 
+import qualified Data.Map.Strict                   as Map
 import qualified Data.Set                          as Set
 import qualified Data.Text                         as T
 import qualified Data.Text.IO                      as TIO
 import qualified Distribution.InstalledPackageInfo as PInfo
+import qualified Distribution.Text                 as Cabal
 import qualified Options.Applicative               as O
 import qualified System.Process                    as Proc
 
@@ -178,6 +180,17 @@ determinePackageDb packageRoot = do
   where
     sandboxConfig = packageRoot </> "cabal.sandbox.config"
 
+-- | Get the base package DB given the path to GHC.
+--
+-- Uses the default GHC if given @Nothing@.
+getBasePackageDb :: Maybe FilePath -> IO (Either String PackageDb)
+getBasePackageDb ghcPath' =
+    Proc.readProcess ghcPath ["--print-global-package-db"] ""
+        <&> T.unpack . T.strip . T.pack
+        >>= getPackageDb
+  where
+    ghcPath = fromMaybe "ghc" ghcPath'
+
 -- | Get the number of packages installed in the given package DB.
 installedPackageCount :: PackageDb -> Int
 installedPackageCount = length . packageDbInstalledPackages
@@ -263,8 +276,8 @@ listPackages name = do
 
 
 ------------------------------------------------------------------------------
-mix :: Text -> IO ()
-mix name = do
+mix :: [Text] -> Text -> IO ()
+mix packageNames name = do
     currentPackageDb <- determinePackageDb "." >>= either fail return
 
     sandman <- defaultSandman
@@ -273,9 +286,99 @@ mix name = do
     sandboxPackageDb <- determinePackageDb (sandboxRoot sandbox)
                     >>= either fail return
 
-    let packagesToInstall = filterPackages
-            (packageDbInstalledPackages currentPackageDb)
-            (packageDbInstalledPackages sandboxPackageDb)
+    let sandboxPackageNames = Set.fromList . map installedPackageName $
+            packageDbInstalledPackages sandboxPackageDb
+
+    -- Make sure that all requested packages are installed.
+    forM_ packageNames $ \requestedPackage ->
+        unless (requestedPackage `Set.member` sandboxPackageNames) $
+            die $ requestedPackage <> " is not installed in " <> name
+
+    basePackageIds <- getPackageGhcPath (sandboxRoot sandbox)
+        >>= getBasePackageDb >>= either fail return
+        <&> map installedPackageId . packageDbInstalledPackages
+
+    let -- Returns True if another package with the same name has already been
+        -- installed to the target sandbox
+        isAlreadyInstalled =
+            (`Set.member` alreadyInstalled) . installedPackageName
+          where
+            alreadyInstalled = Set.fromList . map installedPackageName $
+                packageDbInstalledPackages currentPackageDb
+
+
+        -- Reverse mapping from Cabal's InstalledPackageId to InstalledPackage
+        -- for all packages in the managed sandbox
+        installedPackageIdIndex = Map.fromList $ do
+            installedPackage <- packageDbInstalledPackages sandboxPackageDb
+            let pinfo = installedPackageInfo installedPackage
+            return (PInfo.installedPackageId pinfo, installedPackage)
+
+        -- Reverse mapping from package names to InstalledPackages for all
+        -- packages in the managed sandbox
+        installedPackageNameIndex = Map.fromList $ do
+            installedPackage <- packageDbInstalledPackages sandboxPackageDb
+            return (installedPackageName installedPackage, installedPackage)
+
+        isBase pkgId' = any (`T.isPrefixOf` pkgId) basePackageIds
+          where pkgId = T.pack $ Cabal.display pkgId'
+
+        -- Get the InstalledPackage objects for the direct dependencies of the
+        -- given InstaledPackage
+        getDirectDependencies pkg = do
+          dep <- PInfo.depends (installedPackageInfo pkg)
+          if isBase dep then mzero else
+            case dep `Map.lookup` installedPackageIdIndex of
+              Nothing -> error $ unwords [
+                  "Installed package", T.unpack (installedPackageName pkg)
+                , "depends on", Cabal.display dep
+                , "which is not installed in sandbox", T.unpack name
+                ]
+              Just depPkg -> return depPkg
+
+        -- Get the InstalledPackage objects for all dependencies of the given
+        -- InstaledPackage.
+        --
+        -- This includes dependencies of dependencies and so on.
+        getDependencies _pkg = loop Set.empty [] [_pkg]
+          where
+            loop _ result [] = result
+            loop visited result (pkg:pkgs)
+                | pname `Set.member` visited = loop visited result pkgs
+                | otherwise =
+                    loop (pname `Set.insert` visited)
+                         (pkg:result)
+                         (pkgs ++ getDirectDependencies pkg)
+              where
+                pname = installedPackageName pkg
+
+        -- Names of requested packages and their dependencies
+        requestedPackages :: Set Text
+        requestedPackages = Set.fromList $ do
+            pkgName <- packageNames
+            case pkgName `Map.lookup` installedPackageNameIndex of
+              Nothing -> error $ unwords [
+                  "Requested package", T.unpack pkgName
+                , "is not installed in sandbox", T.unpack name
+                ]
+              Just installedPkg -> do
+                depPkg <- getDependencies installedPkg
+                [pkgName, installedPackageName depPkg]
+
+        -- Whether a package was requested for installation.
+        --
+        -- Always returns True if --only was skipped. If --only was given,
+        -- returns true only for requested packages and their dependencies.
+        isRequested = if null packageNames then const True else
+            (`Set.member` requestedPackages) . installedPackageName
+
+        -- Returns True if the package should be installed
+        shouldInstall pkg = isRequested pkg && not (isAlreadyInstalled pkg)
+
+        -- List of packages that will be installed
+        packagesToInstall = filter shouldInstall $
+            packageDbInstalledPackages sandboxPackageDb
+
         newPackageCount = length packagesToInstall
 
     when (newPackageCount == 0) $
@@ -302,18 +405,6 @@ mix name = do
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
-  where
-    filterPackages installed = loop []
-      where
-        installedIndex :: Set Text
-        installedIndex = Set.fromList $ map installedPackageId installed
-
-        loop toInstall [] = toInstall
-        loop toInstall (c:candidates)
-            | installedPackageId c `Set.member` installedIndex
-                = loop toInstall candidates
-            | otherwise = loop (c:toInstall) candidates
-
 
 ------------------------------------------------------------------------------
 clean :: IO ()
@@ -369,11 +460,18 @@ argParser = O.subparser $ mconcat [
     , command "install" "Install a new package" $
         install <$> nameArgument <*> packagesArgument
     , command "mix" "Mix a sandman sandbox into the current project" $
-        mix <$> nameArgument
+        mix <$> many (T.pack <$> packageNameOption)
+            <*> nameArgument
     , command "clean" "Remove all mixed sandboxes from the current project" $
         pure clean
     ]
   where
+    packageNameOption = O.strOption $
+        O.long "only" <> O.metavar "PACKAGE" <>
+        O.help (unwords [
+            "If added, only the specified packages (and their dependencies)"
+          , "will be mixed in. This option may be specified multiple times."
+          ])
     newOptions = O.optional . O.strOption $
         O.long "with-ghc" <> O.metavar "GHC" <>
         O.help (unwords [
