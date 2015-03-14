@@ -30,7 +30,14 @@ development.
     [..]
     Created sandbox common.
 
-    $ sandman install common classy-prelude
+Managed sandboxes can be told to use specific versions of GHC. This information
+will be propagated to projects with which this sandbox is mixed.
+
+    $ sandman new common --with-ghc ghc-7.6.3
+
+We install our commonly used packages
+
+    $ sandman install common classy-prelude 
     [..]
     Configuring classy-prelude-0.10.2...
     Building classy-prelude-0.10.2...
@@ -51,6 +58,8 @@ development.
     $ sandman list
     common (45 packages)
 
+    $ sandman install common optparse-applicative aeson
+
 Next, we mix it into an existing project.
 
     $ cd my_project
@@ -63,7 +72,7 @@ Next, we mix it into an existing project.
     Rebuilding package cache.
 
     $ cabal sandbox hc-pkg list | grep classy-prelude
-    classy-prelude-0.10.2
+      classy-prelude-0.10.2
 
     $ cabal repl
     GHCi, version 7.8.3: http://www.haskell.org/ghc/  :? for help
@@ -78,9 +87,38 @@ Next, we mix it into an existing project.
     Removed 45 packages.
     Rebuilding package cache.
 
+`sandman` can also mix in only specific packages and their dependencies from
+managed sandboxes.
+
+    $ sandman mix common --only system-filepath --only system-fileio
+    Mixing 3 new packages into package DB at [..]
+    Rebuilding package cache.
+
+    $ cabal sandbox hc-pkg list
+    [..]
+      system-fileio-0.3.16
+      system-filepath-0.4.13.1
+      text-1.2.0.4
+
 # Status
 
-This repository contains a working prototype. I am still in the process of
-evaluating how well this works for my work flow. Feel free to try it out. Keep
-in mind that since you're breaking sandbox boundaries, there is a higher chance
-of running into version conflicts.
+This repository contains an alpha status prototype. It's stable enough for
+basic use cases but there are surely a lot of unexplored corner cases. Feel
+free to try it out. Keep in mind that since you're breaking sandbox boundaries,
+there is a higher chance of running into version conflicts.
+
+# Installation
+
+Because of the alpha status of this project, I have not yet put it up on
+Hackage. To try it out, you need to clone the repository and compile it
+manually.
+
+    git clone https://github.com/abhinav/haskell-sandman.git sandman
+    cd sandman
+    cabal sandbox init
+    cabal install
+
+Then copy the binary somewhere on your path
+
+    cp .cabal-sandbox/bin/sandman ~/bin
+

@@ -467,7 +467,7 @@ argParser = O.subparser $ mconcat [
     ]
   where
     packageNameOption = O.strOption $
-        O.long "only" <> O.metavar "PACKAGE" <>
+        O.long "only" <> O.short 'o' <> O.metavar "PACKAGE" <>
         O.help (unwords [
             "If added, only the specified packages (and their dependencies)"
           , "will be mixed in. This option may be specified multiple times."
