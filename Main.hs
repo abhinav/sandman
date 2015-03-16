@@ -401,8 +401,10 @@ mix packageNames includeExecutables name = do
     when (includeExecutables && not (null executables)) $ do
         let newBinDir = takeDirectory currentPackageDbRoot </> "bin"
         createDirectoryIfMissing True newBinDir
-        forM_ executables $ \exec ->
-            copyFile exec (newBinDir </> takeFileName exec)
+        forM_ executables $ \exec -> do
+            let newPath = newBinDir </> takeFileName exec
+            alreadyExists <- doesFileExist newPath
+            unless alreadyExists $ copyFile exec newPath
 
     ghcPath <- getPackageGhcPath (sandboxRoot sandbox)
     case ghcPath of
