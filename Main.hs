@@ -14,7 +14,8 @@ import System.Directory    (canonicalizePath, copyFile,
                             doesFileExist, findExecutable, getHomeDirectory,
                             removeFile)
 import System.Exit         (ExitCode (..))
-import System.FilePath     (splitDirectories, takeFileName, (</>))
+import System.FilePath     (splitDirectories, takeDirectory, takeFileName,
+                            (</>))
 
 import qualified Data.Map.Strict                   as Map
 import qualified Data.Set                          as Set
@@ -276,8 +277,8 @@ listPackages name = do
 
 
 ------------------------------------------------------------------------------
-mix :: [Text] -> Text -> IO ()
-mix packageNames name = do
+mix :: [Text] -> Bool -> Text -> IO ()
+mix packageNames includeExecutables name = do
     currentPackageDb <- determinePackageDb "." >>= either fail return
 
     sandman <- defaultSandman
@@ -391,10 +392,17 @@ mix packageNames name = do
       ]
 
     let currentPackageDbRoot = packageDbRoot currentPackageDb
-    forM_ packagesToInstall $ \installedPackage ->
+    forM_ packagesToInstall $ \installedPackage -> do
       let currentPath = installedPackageInfoPath installedPackage
           newPath = currentPackageDbRoot </> takeFileName currentPath
-      in copyFile currentPath newPath
+      copyFile currentPath newPath
+
+    executables <- listDirectory (sandboxRoot sandbox </> "bin")
+    when (includeExecutables && not (null executables)) $ do
+        let newBinDir = takeDirectory currentPackageDbRoot </> "bin"
+        createDirectoryIfMissing True newBinDir
+        forM_ executables $ \exec ->
+            copyFile exec (newBinDir </> takeFileName exec)
 
     ghcPath <- getPackageGhcPath (sandboxRoot sandbox)
     case ghcPath of
@@ -461,11 +469,15 @@ argParser = O.subparser $ mconcat [
         install <$> nameArgument <*> packagesArgument
     , command "mix" "Mix a sandman sandbox into the current project" $
         mix <$> many (T.pack <$> packageNameOption)
+            <*> includeExecutablesOption
             <*> nameArgument
     , command "clean" "Remove all mixed sandboxes from the current project" $
         pure clean
     ]
   where
+    includeExecutablesOption = O.switch $
+        O.long "executables" <> O.short 'x' <>
+        O.help "Mix executables from the managed sandbox into the project."
     packageNameOption = O.strOption $
         O.long "only" <> O.short 'o' <> O.metavar "PACKAGE" <>
         O.help (unwords [

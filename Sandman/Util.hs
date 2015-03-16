@@ -14,8 +14,8 @@ import Control.Applicative
 import Control.Monad
 import Data.Monoid              ((<>))
 import Data.Text                (Text)
-import System.Directory         (getDirectoryContents, removeDirectory,
-                                 removeFile)
+import System.Directory         (doesDirectoryExist, getDirectoryContents,
+                                 removeDirectory, removeFile)
 import System.Exit              (exitFailure, exitSuccess)
 import System.FilePath          ((</>))
 import System.IO                (stderr)
@@ -36,9 +36,12 @@ tshow :: Show a => a -> Text
 tshow = T.pack . show
 
 listDirectory :: FilePath -> IO [FilePath]
-listDirectory d = getDirectoryContents d
-    <&> filter (`notElem` [".", ".."])
-    <&> map (d </>)
+listDirectory d = doesDirectoryExist d >>= \exists ->
+  if not exists
+    then return []
+    else getDirectoryContents d
+            <&> filter (`notElem` [".", ".."])
+            <&> map (d </>)
 
 removeTree :: FilePath -> IO ()
 removeTree path = do

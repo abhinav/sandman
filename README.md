@@ -100,6 +100,15 @@ managed sandboxes.
       system-filepath-0.4.13.1
       text-1.2.0.4
 
+The `--executables` option may be used to include executables from a sandbox.
+
+    $ sandman mix common --executables --only hspec
+    Mixing 15 new packages into package DB at [..]
+    Rebuilding package cache.
+
+    $ ls .cabal-sandbox/bin
+    hspec-discover
+
 # Status
 
 This repository contains an alpha status prototype. It's stable enough for
