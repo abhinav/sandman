@@ -28,4 +28,4 @@ executable sandman
 
 source-repository head
   type    : git
-  location: git://github.com/abhinav/haskell-sandman.git
+  location: git://github.com/abhinav/sandman.git
