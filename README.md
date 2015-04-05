@@ -111,23 +111,21 @@ The `--executables` option may be used to include executables from a sandbox.
 
 # Status
 
-This repository contains an alpha status prototype. It's stable enough for
-basic use cases but there are surely a lot of unexplored corner cases. Feel
-free to try it out. Keep in mind that since you're breaking sandbox boundaries,
-there is a higher chance of running into version conflicts.
+Sandman is stable enough for basic use cases but there are surely a lot of
+unexplored corner cases. Feel free to try it out. Keep in mind that since
+you're breaking sandbox boundaries, there is a higher chance of running into
+version conflicts.
 
 # Installation
 
-Because of the alpha status of this project, I have not yet put it up on
-Hackage. To try it out, you need to clone the repository and compile it
-manually.
+You can download and install `sandman` from Hackage by using,
 
-    git clone https://github.com/abhinav/haskell-sandman.git sandman
-    cd sandman
-    cabal sandbox init
-    cabal install
+    $ cabal install sandman
 
-Then copy the binary somewhere on your path
+Or if you would rather not pollute your global package database, install it
+into a sandbox and copy the executable somewhere on your `$PATH`.
 
-    cp .cabal-sandbox/bin/sandman ~/bin
-
+    $ mkdir tmp && cd tmp
+    $ cabal sandbox init
+    $ cabal install sandman
+    $ cp .cabal-sandbox/bin/sandman ~/bin
