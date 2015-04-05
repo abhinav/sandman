@@ -1,0 +1,1 @@
+- Add `ghc` and `ghci` commands
