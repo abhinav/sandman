@@ -1,5 +1,5 @@
 name          : sandman
-version       : 0.1.0.0
+version       : 0.1.0.1
 synopsis      : Manages Cabal sandboxes to avoid rebuilding packages.
 homepage      : https://github.com/abhinav/sandman
 license       : MIT
@@ -26,7 +26,7 @@ executable sandman
   other-modules    : Sandman.InstalledPackage
                    , Sandman.PackageDb
                    , Sandman.Util
-  build-depends    : base                 >= 4.7  && < 4.8
+  build-depends    : base                 >= 4.7  && < 4.9
 
                    , Cabal
                    , containers           >= 0.5
