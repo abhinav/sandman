@@ -30,6 +30,8 @@ import Sandman.InstalledPackage
 import Sandman.PackageDb
 import Sandman.Util
 
+import qualified Sandman.Stack as Stack
+
 ------------------------------------------------------------------------------
 -- | Main context for the program.
 --
@@ -220,6 +222,8 @@ list = do
 ------------------------------------------------------------------------------
 new :: Maybe FilePath -> Text -> IO ()
 new ghcPath' name = do
+    when (name == "stack") $
+        die "Sandbox 'stack' could not be created. That name is reserved."
     ghcPath <- maybe (return Nothing)
                      (fmap Just . resolveExecutable)
                      ghcPath'
@@ -281,11 +285,8 @@ mix :: [Text] -> Bool -> Text -> IO ()
 mix packageNames includeExecutables name = do
     currentPackageDb <- determinePackageDb "." >>= either fail return
 
-    sandman <- defaultSandman
-    sandbox <- getSandbox sandman name
-        >>= maybe (die $ "Sandbox " <> name <> " does not exist.") return
-    sandboxPackageDb <- determinePackageDb (sandboxRoot sandbox)
-                    >>= either fail return
+    (sandboxPackageDb, basePackageDb, copyExecutables, getGhcPath) <-
+        getSandboxAndBasePackageDb
 
     let sandboxPackageNames = Set.fromList . map installedPackageName $
             packageDbInstalledPackages sandboxPackageDb
@@ -295,11 +296,10 @@ mix packageNames includeExecutables name = do
         unless (requestedPackage `Set.member` sandboxPackageNames) $
             die $ requestedPackage <> " is not installed in " <> name
 
-    basePackageIds <- getPackageGhcPath (sandboxRoot sandbox)
-        >>= getBasePackageDb >>= either fail return
-        <&> map installedPackageId . packageDbInstalledPackages
+    let basePackageIds = map installedPackageId
+                       $ packageDbInstalledPackages basePackageDb
 
-    let -- Returns True if another package with the same name has already been
+        -- Returns True if another package with the same name has already been
         -- installed to the target sandbox
         isAlreadyInstalled =
             (`Set.member` alreadyInstalled) . installedPackageName
@@ -397,16 +397,10 @@ mix packageNames includeExecutables name = do
           newPath = currentPackageDbRoot </> takeFileName currentPath
       copyFile currentPath newPath
 
-    executables <- listDirectory (sandboxRoot sandbox </> "bin")
-    when (includeExecutables && not (null executables)) $ do
-        let newBinDir = takeDirectory currentPackageDbRoot </> "bin"
-        createDirectoryIfMissing True newBinDir
-        forM_ executables $ \exec -> do
-            let newPath = newBinDir </> takeFileName exec
-            alreadyExists <- doesFileExist newPath
-            unless alreadyExists $ copyFile exec newPath
+    -- Copy executables to bin/ directory if requested.
+    copyExecutables $ takeDirectory currentPackageDbRoot </> "bin"
 
-    ghcPath <- getPackageGhcPath (sandboxRoot sandbox)
+    ghcPath <- getGhcPath
     case ghcPath of
         Nothing -> return ()
         Just path -> do
@@ -415,6 +409,55 @@ mix packageNames includeExecutables name = do
 
     putStrLn "Rebuilding package cache."
     Proc.callProcess "cabal" ["sandbox", "hc-pkg", "recache"]
+  where
+    getSandboxAndBasePackageDb
+        | name == "stack" = do
+            sandboxPackageDb <- Stack.getSnapshotPackageDb Nothing
+                >>= either fail return
+            basePackageDb <- Stack.getGlobalPackageDb
+                >>= either fail return
+
+            let copyExecutables _ = when includeExecutables . die $ T.unwords
+                    [ "Copying executables for stack snapshots is"
+                    , "not supported."
+                    ]
+                getGhcPath = Just <$> Stack.getGhcPath
+
+            return
+                ( sandboxPackageDb
+                , basePackageDb
+                , copyExecutables
+                , getGhcPath
+                )
+
+        | otherwise = do
+            sandman <- defaultSandman
+            sandbox <- getSandbox sandman name
+                >>= maybe (die $ "Sandbox " <> name <> " does not exist.")
+                           return
+            sandboxPackageDb <- determinePackageDb (sandboxRoot sandbox)
+                >>= either fail return
+            basePackageDb <- getPackageGhcPath (sandboxRoot sandbox)
+                >>= getBasePackageDb
+                >>= either fail return
+
+            let binDir = sandboxRoot sandbox </> "bin"
+
+                copyExecutables newBinDir = do
+                    executables <- listDirectory binDir
+                    when (includeExecutables && not (null executables)) $ do
+                        createDirectoryIfMissing True newBinDir
+                        forM_ executables $ \exec -> do
+                            let newPath = newBinDir </> takeFileName exec
+                            alreadyExists <- doesFileExist newPath
+                            unless alreadyExists $ copyFile exec newPath
+
+            return
+                ( sandboxPackageDb
+                , basePackageDb
+                , copyExecutables
+                , getPackageGhcPath (sandboxRoot sandbox)
+                )
 
 ------------------------------------------------------------------------------
 clean :: IO ()
@@ -469,7 +512,11 @@ argParser = O.subparser $ mconcat [
         destroy <$> nameArgument
     , command "install" "Install a new package" $
         install <$> nameArgument <*> packagesArgument
-    , command "mix" "Mix a sandman sandbox into the current project" $
+    , command "mix"
+        (unwords
+            [ "Mix a sandman sandbox into the current project."
+            , "Use the name 'stack' to mix in packages from stack snapshots."
+            ]) $
         mix <$> many (T.pack <$> packageNameOption)
             <*> includeExecutablesOption
             <*> nameArgument

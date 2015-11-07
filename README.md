@@ -109,6 +109,21 @@ The `--executables` option may be used to include executables from a sandbox.
     $ ls .cabal-sandbox/bin
     hspec-discover
 
+# Stack
+
+`sandman` also supports mixing in packages from a [`stack`] snapshot package
+database.
+
+    $ sandman mix stack
+
+This mixes in all packages from the default snapshot database into the current
+Cabal sandbox. The `-o/--only` options may be used to limit the packages to a
+minimal subset.
+
+    $ sandman mix stack -o text
+
+  [`stack`]: https://github.com/commercialhaskell/stack
+
 # Status
 
 Sandman is stable enough for basic use cases but there are surely a lot of
