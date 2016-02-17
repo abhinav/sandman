@@ -144,3 +144,7 @@ into a sandbox and copy the executable somewhere on your `$PATH`.
     $ cabal sandbox init
     $ cabal install sandman
     $ cp .cabal-sandbox/bin/sandman ~/bin
+
+Or simply use `stack`:
+
+    $ stack install sandman
