@@ -26,7 +26,7 @@ executables:
     main: Main.hs
     source-dirs: src
     dependencies:
-      - base >= 4.7 && < 4.9
+      - base >= 4.7 && < 5
       - Cabal
       - containers >= 0.5
       - directory >= 1.2
