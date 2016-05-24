@@ -3,7 +3,7 @@
 -- see: https://github.com/sol/hpack
 
 name:           sandman
-version:        0.2.0.0
+version:        0.2.0.1
 synopsis:       Manages Cabal sandboxes to avoid rebuilding packages.
 description:    sandman aims to reduce the amount of time spent rebuilding commonly used
                 Hackage packages by managing a global set of Cabal sandboxes that can be
